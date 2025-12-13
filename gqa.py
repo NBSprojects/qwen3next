@@ -28,32 +28,34 @@ class GroupRopeAttention(nn.Module):
         self.theta_base = 10000.0 
 
 
-    def compute_rope_mats(self, x):
+
+    def compute_rope_mats(self, x, start_pos: int = 0):
         '''
         calcule 2 torch matrices de taille (seq_len, self.hd)
         la premiere vaut Rc(i, j) = cos(i * theta_((j // 2) + 1))
         la deuxieme vaut Rs(i, j) = sin(i * theta_((j // 2) + 1))
         où theta_k = self.theta_val ** (2*k / self.hd)
-        '''
-        seq_len = x.shape[1]
-        device = x.device
-        dtype = x.dtype 
 
-        # Fréquences : dim/2 valeurs
+        retourne Rc, Rs de shape (1, 1, L, D) pour appliquer RoPE
+        sur un tenseur de shape (..., L, D). start_pos permet l'offset (KV cache).
+        '''
+        # IMPORTANT: L est l'avant-dernière dimension (Seq)
+        seq_len = x.shape[-2]
+        device = x.device
+        dtype = x.dtype
+
         dim = self.hd
         freqs = 1.0 / (self.theta_base ** (torch.arange(0, dim, 2, device=device).float() / dim))
-        
-        t = torch.arange(seq_len, device=device, dtype=freqs.dtype)
-        freqs_outer = torch.outer(t, freqs) # (seq_len, dim/2)
-        
-        # CORRECTION MATHS : On répète pour que (0,1), (2,3) partagent la même freq
-        freqs_cis = torch.repeat_interleave(freqs_outer, 2, dim=-1) # (seq_len, dim)
-        
-        # Broadcast pour correspondre aux dimensions (Batch, Head, Seq, Dim)
-        # Cos et Sin
-        Rc = torch.cos(freqs_cis).unsqueeze(0).unsqueeze(0) # (1, 1, L, D)
+
+        # positions absolues : [start_pos, ..., start_pos + seq_len - 1]
+        t = torch.arange(start_pos, start_pos + seq_len, device=device, dtype=freqs.dtype)
+        freqs_outer = torch.outer(t, freqs)  # (seq_len, dim/2)
+
+        freqs_cis = torch.repeat_interleave(freqs_outer, 2, dim=-1)  # (seq_len, dim)
+
+        Rc = torch.cos(freqs_cis).unsqueeze(0).unsqueeze(0)  # (1, 1, L, D)
         Rs = torch.sin(freqs_cis).unsqueeze(0).unsqueeze(0)
-        
+
         return Rc.to(dtype), Rs.to(dtype)
 
         
@@ -80,37 +82,68 @@ class GroupRopeAttention(nn.Module):
 
 
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None, use_cache: bool = False):
+        """
+        x: [B, L, emb_dim]
+        kv_cache: None ou (K_cache, V_cache)
+          - K_cache: [B, 1, L_past, hd] (déjà RoPE-appliqué)
+          - V_cache: [B, 1, L_past, hd]
+        use_cache:
+          - si True, retourne (out, (K_total, V_total))
+          - sinon, retourne out
+        """
+        B, Lq, _ = x.shape  # Lq = longueur query (souvent 1 en génération)
 
-        # x : [bs, seq_len, emb_dim]
+        # Q : [B, Lq, num_heads*hd] -> [B, num_heads, Lq, hd]
+        Qs = self.query(x).view(B, Lq, self.num_heads, self.hd).transpose(1, 2)
 
-        B, L, _ = x.shape
-        
-        # Q : [B, L, G*H] -> [B, L, G, H] -> [B, G, L, H]
-        Qs = self.query(x).view(B, L, self.num_heads, self.hd).transpose(1, 2)
-        # K, V : [B, L, H] -> [B, 1, L, H] (Broadcast pour le groupe)
-        K = self.key(x).unsqueeze(1) 
-        V = self.value(x).unsqueeze(1)
+        # K_new, V_new : [B, 1, Lq, hd]
+        K_new = self.key(x).unsqueeze(1)
+        V_new = self.value(x).unsqueeze(1)
 
         if self.qk_norm:
             Qs = F.normalize(Qs, p=2, dim=-1)
-            K  = F.normalize(K,  p=2, dim=-1)
+            K_new = F.normalize(K_new, p=2, dim=-1)
 
-        Rc, Rs = self.compute_rope_mats(Qs)
+        past_len = 0
+        if kv_cache is not None:
+            K_past, V_past = kv_cache
+            past_len = K_past.shape[2]
+
+        # RoPE avec offset = past_len (positions absolues)
+        Rc, Rs = self.compute_rope_mats(Qs, start_pos=past_len)
         Qs = self.apply_rope(Qs, Rc, Rs)
-        K = self.apply_rope(K, Rc, Rs)
+        K_new = self.apply_rope(K_new, Rc, Rs)
 
-        # Qs: [B, G, L, D], K: [B, 1, L, D]
+        # Concat cache + nouveaux KV (si cache fourni)
+        if kv_cache is not None:
+            K = torch.cat([K_past, K_new], dim=2)   # [B, 1, L_total, hd]
+            V = torch.cat([V_past, V_new], dim=2)   # [B, 1, L_total, hd]
+        else:
+            K, V = K_new, V_new
+
+        Lk = K.shape[2]  # longueur key totale
+
+        # scores: [B, num_heads, Lq, Lk]
         scores = torch.einsum('bgld,bgjd->bglj', Qs, K) / math.sqrt(self.hd)
 
-        causal_mask = torch.triu(torch.ones((L, L), device=x.device, dtype=torch.bool), diagonal=1)
+        # causal mask adapté à (Lq, Lk) avec offset past_len
+        # masque j > (past_len + i)
+        causal_mask = torch.triu(
+            torch.ones((Lq, Lk), device=x.device, dtype=torch.bool),
+            diagonal=1 + past_len
+        )
         scores = scores.masked_fill(causal_mask, float('-inf'))
 
-        atts = torch.softmax(scores, dim=-1) # [B, G, L, L]
+        atts = torch.softmax(scores, dim=-1)  # [B, num_heads, Lq, Lk]
 
-        otps = torch.einsum('bgij,bgjk->bgik', atts, V) # [B, G, L, D]
+        # out: [B, num_heads, Lq, hd]
+        otps = torch.einsum('bgij,bgjk->bgik', atts, V)
 
-        otps = otps.transpose(1, 2).contiguous().view(B, L, self.num_heads * self.hd)
-        
+        # [B, Lq, num_heads*hd]
+        otps = otps.transpose(1, 2).contiguous().view(B, Lq, self.num_heads * self.hd)
+
+        if use_cache:
+            return otps, (K, V)
         return otps
 

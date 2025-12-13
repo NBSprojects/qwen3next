@@ -1,0 +1,44 @@
+- quelles métriques observer ? 
+nb de params vs loss finale a nb diterations fixés ? 
+test loss finale a nb diterations fixés
+token/s ? si on implémente KV cache
+
+- quel dataset ? wikitext103
+
+- partager entre modèles
+Tokenizer (ex: GPT‑2 BPE) — identique pour tous
+Corpus tokenisé / shards (idéalement pré-tokenisés une fois)
+Dataloader & packing (même stratégie de séquences fixes)
+Split train/val fixe, seed fixe
+Longueur de contexte fixe par “campagne” (important pour torch.compile)
+
+- taille du modele : on commence par 125M
+
+- Training recipe minimal (à figer)
+Précision : BF16 (A100 ok)
+Optim : AdamW classique (ou fused si dispo)
+Séquence : 1024 ou 2048 (fixe, pas variable)
+Batching : raisonne en tokens/update (ex : 512k tokens/update)
+dans le dataloader, drop_last = true, important pour des tailles constantes et donc pas de graph breaks
+seq_len fixe (tres important, vérifié que ca fonctionne)
+→ microbatch × grad_accum pour saturer le GPU
+Dropout : fixe (ou 0 pour benchmark pur perf)
+Eval : un val set fixe (ex 10k–50k séquences)
+weight decay 
+
+experiments : 
+base
+base + GQA
+base + GQA + MoE
+
+- train :
+attention a la stabilité, voir le nombre de tokens re route pour chaque experiments
+
+
+
+objectif ce soir : 
+
+avoir un full module qui run l'inférence avec / sans KV cache et observer une accélération
+tester différents modes MHA, GQA, 
+
+

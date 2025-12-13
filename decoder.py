@@ -41,15 +41,30 @@ class DecoderGQALayer(nn.Module):
 
         
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None, use_cache=False):
         # x : [bs, seq_len, emb_dim]
 
         x_init = x
 
         x = self.norm1(x)
 
-        # faire passer x dans les différents groupes, puis re concaténer
-        attention_otps = [layer(x) for layer in self.gqas]
+        new_kv_cache = None
+
+        if use_cache:
+            # kv_cache attendu : liste longueur num_groups, chaque elem None ou (K,V)
+            if kv_cache is None:
+                kv_cache = [None] * self.num_groups
+            else:
+                assert len(kv_cache) == self.num_groups
+
+            attention_otps = []
+            new_kv_cache = []
+            for i, layer in enumerate(self.gqas):
+                out, kv_i = layer(x, kv_cache=kv_cache[i], use_cache=True)
+                attention_otps.append(out)
+                new_kv_cache.append(kv_i)
+        else:
+            attention_otps = [layer(x) for layer in self.gqas]
 
         # on a une liste d'éléments de G éléments de shape [bs, seq_len, H*hd], on concatène selon la derniere dim
         x = torch.concat(attention_otps, dim=-1)
@@ -66,4 +81,6 @@ class DecoderGQALayer(nn.Module):
 
         x_final = x_mid + x
 
-        return x, load_balancing_loss
+        if use_cache:
+            return x_final, load_balancing_loss, new_kv_cache
+        return x_final, load_balancing_loss

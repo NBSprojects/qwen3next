@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 '''
 references :
-https://arxiv.org/pdf/2401.06066
+https://arxiv.org/pdf/2101.03961 (switch transformers)
+https://arxiv.org/pdf/2401.06066 (DeepSeek MoE)
 
 '''
 
@@ -29,74 +31,143 @@ class FFN(nn.Module):
 class MoE(nn.Module):
     def __init__(self, k, num_exp, in_d, hd):
         super().__init__()
-        '''
-        k : number of selected experts 
+        """
+        k : number of selected experts
         num_exp : total number of experts
         in_d : embedding dimension
         hd : hidden dim of MLP layer
-        '''
+        """
         self.k = k
         self.num_exp = num_exp
+        self.in_d = in_d
+
         self.experts = nn.ModuleList([FFN(in_d, hd) for _ in range(num_exp)])
         self.gate_layer = nn.Linear(in_d, num_exp, bias=False)
+
+        # --- Capacity routing knobs (keep signature; tune by setting attributes after init) ---
+        self.capacity_factor = 1.25   # typical values: 1.0, 1.25, 2.0 ...
+        self.min_capacity = 4         # avoid tiny capacities on very small batches
+        self.capacity = None          # if set (int): overrides computed capacity
+
+    def _compute_capacity(self, N_tokens: int) -> int:
+        """
+        Compute per-expert capacity in number of *slots*.
+        For top-k routing, total slots = N_tokens * k.
+        """
+        if self.capacity is not None:
+            cap = int(self.capacity)
+            return max(cap, 1)
+
+        # average slots per expert (ceil)
+        total_slots = N_tokens * self.k
+        avg = (total_slots + self.num_exp - 1) // self.num_exp
+        cap = int(math.ceil(avg * float(self.capacity_factor)))
+        cap = max(cap, int(self.min_capacity))
+        return cap
 
     def forward(self, x):
         # x: [bs, seq_len, in_d]
         bs, seq_len, in_d = x.shape
+        assert in_d == self.in_d, f"Expected in_d={self.in_d}, got {in_d}"
         N = bs * seq_len
+        NK = N * self.k
 
-        logits = self.gate_layer(x)                     # [bs, seq_len, num_exp]
-        probs = F.softmax(logits, dim=-1)               # for routing
+        # --- Router ---
+        logits = self.gate_layer(x)                 # [bs, seq_len, num_exp]
+        probs = F.softmax(logits, dim=-1)
 
         # probs_lbl for balancing loss (detached input)
         probs_lbl = F.softmax(self.gate_layer(x.detach()), dim=-1)
 
         topk_vals, topk_inds = torch.topk(probs, self.k, dim=-1)  # [bs, seq_len, k]
-        cl_values = topk_vals / topk_vals.sum(dim=-1, keepdim=True)  # [bs, seq_len, k]
+        cl_values = topk_vals / (topk_vals.sum(dim=-1, keepdim=True) + 1e-9)  # [bs, seq_len, k]
 
-        # OPTIMIZED INFERENCE THROUGH FFNs
-        # the idea is to group tokens by attributed experts
-        # in a multi gpu context we load experts on different gpus to speed up the process
+        # --- Flatten into (token, expert) dispatch entries ---
+        x_flat = x.reshape(N, in_d)  # [N, in_d]
+        x_expanded = (
+            x_flat.unsqueeze(1)
+                 .expand(-1, self.k, -1)
+                 .reshape(NK, in_d)
+        )  # [N*k, in_d]
 
-        x_flat = x.view(N, in_d)                        # [N, in_d]
-        topk_inds_flat = topk_inds.view(N * self.k)     # [N*k]
-        cl_values_flat = cl_values.view(N * self.k)     # [N*k]
-        x_expanded = x_flat.unsqueeze(1).expand(-1, self.k, -1).reshape(N * self.k, in_d)  # [N*k, in_d]
+        exp_ids = topk_inds.reshape(NK).to(torch.int64)      # [N*k]
+        weights = cl_values.reshape(NK)                      # [N*k]
 
-        # Sort by expert index to group tokens
-        sorted_inds, sort_indices = torch.sort(topk_inds_flat)
-        sorted_x = x_expanded[sort_indices]
-        sorted_weights = cl_values_flat[sort_indices]
+        # --- Capacity ---
+        capacity = self._compute_capacity(N)
+        dummy = self.num_exp * capacity  # reserve last index as "overflow sink"
 
-        output_flat = torch.zeros(N * self.k, in_d, device=x.device)
-        unique_inds, counts = torch.unique_consecutive(sorted_inds, return_counts=True)
+        # --- Sort by (expert_id, dispatch_index) to compute position_in_expert deterministically ---
+        dispatch_idx = torch.arange(NK, device=x.device, dtype=torch.int64)
+        key = exp_ids * NK + dispatch_idx  # lexicographic sort: expert_id primary, dispatch_idx secondary
+        sort_perm = torch.argsort(key)     # [N*k]
 
-        start = 0
-        for exp_id, count in zip(unique_inds, counts):
-            if count > 0:
-                tokens = sorted_x[start:start + count]
-                expert_out = self.experts[exp_id](tokens)  # [count, in_d]
-                # Re-weight and place back in original dispatch order
-                weighted_out = expert_out * sorted_weights[start:start + count].unsqueeze(1)
-                output_flat[sort_indices[start:start + count]] = weighted_out
-            start += count
+        sorted_exp = exp_ids.index_select(0, sort_perm)     # [N*k]
+        sorted_x = x_expanded.index_select(0, sort_perm)    # [N*k, in_d]
+        sorted_w = weights.index_select(0, sort_perm)       # [N*k]
+
+        # --- counts per expert (fixed shape [num_exp]) ---
+        counts = torch.zeros(self.num_exp, device=x.device, dtype=torch.int64)
+        ones = torch.ones_like(sorted_exp, dtype=torch.int64)
+        counts.scatter_add_(0, sorted_exp, ones)
+
+        # starts[e] = starting offset of expert e block in the sorted list
+        starts = torch.cumsum(counts, dim=0) - counts  # [num_exp]
+
+        # local_pos[i] = index of this dispatch entry within its expert block
+        sorted_pos = torch.arange(NK, device=x.device, dtype=torch.int64)  # [N*k]
+        local_pos = sorted_pos - starts.index_select(0, sorted_exp)        # [N*k]
+
+        # keep only the first `capacity` entries per expert
+        keep = local_pos < capacity  # [N*k] boolean
+
+        # slot = expert_id * capacity + local_pos, but map overflow to `dummy`
+        slot = sorted_exp * capacity + local_pos  # may exceed range for overflow
+        slot = torch.where(keep, slot, torch.full_like(slot, dummy))  # [N*k] in [0, dummy]
+
+        # --- Dispatch buffer (flat) with extra dummy row ---
+        # buf_x_flat has shape [num_exp*capacity + 1, in_d]
+        buf_x_flat = x.new_zeros((dummy + 1, in_d))
+        # Index-copy is row-wise; duplicates only happen at dummy (overflow), which we ignore later.
+        buf_x_flat.index_copy_(0, slot, sorted_x)
+
+        # Remove dummy row and reshape to [num_exp, capacity, in_d]
+        buf_x = buf_x_flat[:-1].reshape(self.num_exp, capacity, in_d)
+
+        # --- Expert compute (static loop, good for torch.compile) ---
+        buf_out = torch.empty_like(buf_x)
+        for e in range(self.num_exp):
+            buf_out[e] = self.experts[e](buf_x[e])  # [capacity, in_d]
+
+        buf_out_flat = buf_out.reshape(self.num_exp * capacity, in_d)
+
+        # Add dummy output row of zeros so we can safely gather overflow slots
+        buf_out_full = x.new_zeros((dummy + 1, in_d))
+        buf_out_full[:-1].copy_(buf_out_flat)
+
+        # --- Gather back, apply weights (mask overflow by zeroing weights) ---
+        w_masked = sorted_w * keep.to(sorted_w.dtype)   # [N*k]
+        out_sorted = buf_out_full.index_select(0, slot) # [N*k, in_d]
+        out_sorted = out_sorted * w_masked.unsqueeze(1) # [N*k, in_d]
+
+        # --- Unsort to original dispatch order ---
+        out_dispatch = out_sorted.new_empty((NK, in_d))
+        out_dispatch.index_copy_(0, sort_perm, out_sorted)  # out_dispatch[sort_perm[i]] = out_sorted[i]
 
         # --- Recombine: sum over k experts per token ---
-        output_flat = output_flat.view(N, self.k, in_d)
-        moe_output = output_flat.sum(dim=1).view(bs, seq_len, in_d)  # [bs, seq_len, in_d]
+        out_dispatch = out_dispatch.reshape(N, self.k, in_d)
+        moe_output = out_dispatch.sum(dim=1).reshape(bs, seq_len, in_d)
 
-        # Load balancing loss terms
+        # --- Load balancing loss terms (same spirit as your version) ---
         p = probs_lbl.mean(dim=(0, 1))  # [num_exp]
 
-        # f is not differentiable so we consider it constant
         with torch.no_grad():
-            indices_flat = topk_inds.view(-1)  # [N * k]
+            indices_flat = topk_inds.reshape(-1)  # [N*k]
             total_slots = indices_flat.numel()
             f_counts = torch.zeros(self.num_exp, dtype=torch.float32, device=x.device)
             f_counts.scatter_add_(0, indices_flat, torch.ones_like(indices_flat, dtype=torch.float32))
-            f = f_counts / total_slots  # [num_exp]
+            f = f_counts / float(total_slots)
 
         balancing_loss = torch.sum(p * f)
 
         return moe_output, balancing_loss
-
