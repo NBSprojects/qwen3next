@@ -1,2 +1,4 @@
 transformers
 torch
+argparse
+matplotlib

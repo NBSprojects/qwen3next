@@ -21,15 +21,6 @@ class DecoderModel(nn.Module):
     ):
         super().__init__()
 
-        # ⚠️ IMPORTANT : bug dans GroupRopeAttention => il ne fonctionne correctement
-        # que pour num_heads == 1 (voir explication plus bas).
-        if heads_per_group != 1:
-            raise ValueError(
-                "GroupRopeAttention tel qu'implémenté dans gqa.py ne supporte "
-                "pas heads_per_group > 1 (problème de dimensions dans les einsum). "
-                "Utilise heads_per_group=1 ou corrige GroupRopeAttention."
-            )
-
         self.vocab_size = vocab_size
         self.emb_dim = emb_dim
         self.num_layers = num_layers
