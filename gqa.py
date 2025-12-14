@@ -7,10 +7,13 @@ import math
 class GroupRopeAttention(nn.Module):
     def __init__(self, emb_dim, hidden_dim, num_heads, qk_norm=False):
         '''
+        représente un groupe entier
+
+        embedding dim la taille de l'embeddig
+        hidden dime la dim de l'espace latent
+        num_heads le nombre de tetes dans ce groupe (en gros = H/G)
         '''
-        # embedding dim la taille de l'embeddig
-        # hidden dime la dim de l'espace latent
-        # num_heads le nombre de tetes dans ce groupe (en gros = H/G)
+
 
         super().__init__()
 
@@ -25,7 +28,7 @@ class GroupRopeAttention(nn.Module):
         self.query = nn.Linear(emb_dim, hidden_dim * num_heads, bias=False)
         self.value = nn.Linear(emb_dim, hidden_dim, bias=False)
 
-        self.theta_base = 10000.0 
+        self.theta_base = 10000.0 # RoPE
 
 
 

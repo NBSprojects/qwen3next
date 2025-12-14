@@ -84,3 +84,67 @@ class DecoderGQALayer(nn.Module):
         if use_cache:
             return x_final, load_balancing_loss, new_kv_cache
         return x_final, load_balancing_loss
+
+
+class DecoderGQALayerDense(nn.Module):
+    """
+    Bloc équivalent à DecoderGQALayer mais avec FFN dense (pas de MoE).
+    Interface compatible (retourne aussi un "load_balancing_loss" = 0.0).
+    """
+
+    def __init__(self, num_groups: int, heads_per_group: int, emb_dim: int):
+        super().__init__()
+
+        self.num_groups = num_groups
+
+        assert emb_dim % (num_groups * heads_per_group) == 0
+        gqa_hd = emb_dim // (num_groups * heads_per_group)
+
+        self.gqas = nn.ModuleList(
+            [
+                GroupRopeAttention(emb_dim, gqa_hd, heads_per_group)
+                for _ in range(num_groups)
+            ]
+        )
+
+        # FFN dense (SwiGLU) : on réutilise ta classe FFN
+        self.ffn = FFN(emb_dim, 4 * emb_dim)
+
+        self.norm1 = RMSNorm(emb_dim)
+        self.norm2 = RMSNorm(emb_dim)
+
+    def forward(self, x, kv_cache=None, use_cache: bool = False):
+        # x : [bs, seq_len, emb_dim]
+        x_init = x
+        x = self.norm1(x)
+
+        if use_cache:
+            # On garde la même interface que ta version MoE pour compat générique
+            if kv_cache is None:
+                kv_cache = [None] * self.num_groups
+            else:
+                assert len(kv_cache) == self.num_groups
+
+            attention_otps = []
+            new_kv_cache = []
+            for i, layer in enumerate(self.gqas):
+                out, kv_i = layer(x, kv_cache=kv_cache[i], use_cache=True)
+                attention_otps.append(out)
+                new_kv_cache.append(kv_i)
+        else:
+            attention_otps = [layer(x) for layer in self.gqas]
+            new_kv_cache = None
+
+        # concat des G sorties [bs, seq_len, H*hd] -> [bs, seq_len, emb_dim]
+        x = torch.cat(attention_otps, dim=-1)
+        x = x_init + x
+
+        x_mid = x
+        x = self.norm2(x)
+        x = self.ffn(x)
+        x_final = x_mid + x
+
+        lb_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        if use_cache:
+            return x_final, lb_loss, new_kv_cache
+        return x_final, lb_loss

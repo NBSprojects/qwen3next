@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional 
 
-from decoder import DecoderGQALayer, RMSNorm
+from decoder import DecoderGQALayer, RMSNorm, DecoderGQALayerDense
 
 
 class DecoderOnlyLM(nn.Module):
@@ -284,3 +284,84 @@ class DecoderOnlyLM(nn.Module):
         if return_cache:
             return generated, kv_cache
         return generated
+
+
+class DecoderOnlyLMDense(nn.Module):
+    """
+    Version "Dense" du modèle : GQA + FFN dense, pas de MoE.
+    Interface très proche de DecoderOnlyLM (logits, load_balancing_loss).
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        emb_dim: int,
+        n_layers: int,
+        num_groups: int,
+        heads_per_group: int,
+        tie_embeddings: bool = True,
+    ):
+        super().__init__()
+
+        self.vocab_size = vocab_size
+        self.emb_dim = emb_dim
+        self.n_layers = n_layers
+        self.num_groups = num_groups
+
+        self.tok_emb = nn.Embedding(vocab_size, emb_dim)
+
+        self.layers = nn.ModuleList(
+            [
+                DecoderGQALayerDense(
+                    num_groups=num_groups,
+                    heads_per_group=heads_per_group,
+                    emb_dim=emb_dim,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+
+        self.norm_out = RMSNorm(emb_dim)
+        self.lm_head = nn.Linear(emb_dim, vocab_size, bias=False)
+
+        if tie_embeddings:
+            self.lm_head.weight = self.tok_emb.weight
+
+    def forward(self, input_ids, kv_cache=None, use_cache: bool = False):
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)  # on ne passera JAMAIS ici en train
+
+        batch_size, seq_len = input_ids.shape
+        x = self.tok_emb(input_ids)  # [B, L, D]
+
+        load_balancing_losses = []
+
+        if use_cache:
+            if kv_cache is None:
+                kv_cache = [None] * self.n_layers
+            else:
+                assert len(kv_cache) == self.n_layers
+            new_kv_cache = []
+
+        for layer_idx, layer in enumerate(self.layers):
+            if use_cache:
+                x, lb_loss, layer_cache = layer(
+                    x, kv_cache=kv_cache[layer_idx], use_cache=True
+                )
+                new_kv_cache.append(layer_cache)
+            else:
+                x, lb_loss = layer(x, kv_cache=None, use_cache=False)
+            load_balancing_losses.append(lb_loss)
+
+        x = self.norm_out(x)
+        logits = self.lm_head(x)  # [B, L, vocab_size]
+
+        if load_balancing_losses:
+            # ici ce sera toujours 0.0, mais on garde la même interface
+            lb = torch.stack(load_balancing_losses).mean()
+        else:
+            lb = torch.tensor(0.0, device=logits.device)
+
+        if use_cache:
+            return logits, lb, new_kv_cache
+        return logits, lb

@@ -49,6 +49,8 @@ class MoE(nn.Module):
         self.min_capacity = 4         # avoid tiny capacities on very small batches
         self.capacity = None          # if set (int): overrides computed capacity
 
+        self.last_tokens_per_expert = None  # [num_exp]
+
     def _compute_capacity(self, N_tokens: int) -> int:
         """
         Compute per-expert capacity in number of *slots*.
@@ -158,16 +160,25 @@ class MoE(nn.Module):
         out_dispatch = out_dispatch.reshape(N, self.k, in_d)
         moe_output = out_dispatch.sum(dim=1).reshape(bs, seq_len, in_d)
 
-        # --- Load balancing loss terms (same spirit as your version) ---
         p = probs_lbl.mean(dim=(0, 1))  # [num_exp]
 
         with torch.no_grad():
+            # f : fraction de slots alloués par expert (pour le balancing loss)
             indices_flat = topk_inds.reshape(-1)  # [N*k]
             total_slots = indices_flat.numel()
             f_counts = torch.zeros(self.num_exp, dtype=torch.float32, device=x.device)
             f_counts.scatter_add_(0, indices_flat, torch.ones_like(indices_flat, dtype=torch.float32))
             f = f_counts / float(total_slots)
 
+            # Nouveau : nombre de "tokens effectifs" (slots non-overflow) par expert
+            # sorted_exp : expert_id pour chaque dispatch entry (après tri)
+            # keep       : booléen -> True si l'entrée n'est pas overflow (local_pos < capacity)
+            effective_counts = torch.zeros(self.num_exp, dtype=torch.float32, device=x.device)
+            effective_counts.scatter_add_(0, sorted_exp, keep.to(torch.float32))
+            # On mémorise pour que le code de train puisse les lire
+            self.last_tokens_per_expert = effective_counts  # [num_exp]
+
         balancing_loss = torch.sum(p * f)
 
         return moe_output, balancing_loss
+
