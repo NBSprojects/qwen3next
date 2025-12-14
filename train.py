@@ -55,12 +55,14 @@ class TrainConfig:
     log_interval: int = 20
 
     learning_rate: float = 1e-4
+    min_lr: float = 1e-5  
+    use_cosine_scheduler: bool = True
     weight_decay: float = 0.1
     betas: Tuple[float, float] = (0.9, 0.95)
     grad_clip: Optional[float] = 1.0
     lambda_moe: float = 0.01  # coefficient pour le balancing loss
 
-    seed: int = 42
+    seed: int = 147
 
     # --- Device ---
     device: str = "cuda"  # "cuda", "cpu" ou "auto"
@@ -306,7 +308,15 @@ def main():
         )
         print("[INFO] AdamW(fused=False)")
 
-    # Aucune KV cache en training : on appellera toujours model(input_ids) sans use_cache=True
+
+    scheduler = None
+    if cfg.use_cosine_scheduler:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cfg.max_steps,
+            eta_min=cfg.min_lr,
+        )
+
 
     # ------------------------------------------------------------------ #
     # Boucle de training
@@ -366,6 +376,8 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
 
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
         if device.type == "cuda":
             torch.cuda.synchronize()

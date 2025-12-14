@@ -5,7 +5,7 @@ import math
 
 
 class GroupRopeAttention(nn.Module):
-    def __init__(self, emb_dim, hidden_dim, num_heads, qk_norm=False):
+    def __init__(self, emb_dim, hidden_dim, num_heads, qk_norm=False, max_seq_len=2048  ):
         '''
         représente un groupe entier
 
@@ -29,6 +29,24 @@ class GroupRopeAttention(nn.Module):
         self.value = nn.Linear(emb_dim, hidden_dim, bias=False)
 
         self.theta_base = 10000.0 # RoPE
+
+        self.max_seq_len = int(max_seq_len)
+
+        dim = self.hd
+        inv_freq = 1.0 / (self.theta_base ** (torch.arange(0, dim, 2).float() / dim))
+        t = torch.arange(self.max_seq_len, dtype=inv_freq.dtype)
+        freqs_outer = torch.outer(t, inv_freq)
+        freqs_cis = torch.repeat_interleave(freqs_outer, 2, dim=-1)
+
+        self.register_buffer("rope_cos", torch.cos(freqs_cis), persistent=False)
+        self.register_buffer("rope_sin", torch.sin(freqs_cis), persistent=False)
+
+        self.register_buffer(
+            "causal_mask",
+            torch.triu(torch.ones((self.max_seq_len, self.max_seq_len), dtype=torch.bool), diagonal=1),
+            persistent=False
+        )
+
 
 
 
@@ -113,8 +131,12 @@ class GroupRopeAttention(nn.Module):
             K_past, V_past = kv_cache
             past_len = K_past.shape[2]
 
-        # RoPE avec offset = past_len (positions absolues)
-        Rc, Rs = self.compute_rope_mats(Qs, start_pos=past_len)
+        # on ne recalcule les matrices RoPE que si l'on a depassé le contexte max stocké dans le buffer
+        if past_len + Lq <= self.max_seq_len:
+            Rc = self.rope_cos[past_len: past_len + Lq].unsqueeze(0).unsqueeze(0).to(dtype=Qs.dtype)
+            Rs = self.rope_sin[past_len: past_len + Lq].unsqueeze(0).unsqueeze(0).to(dtype=Qs.dtype)
+        else:
+            Rc, Rs = self.compute_rope_mats(Qs, start_pos=past_len)
         Qs = self.apply_rope(Qs, Rc, Rs)
         K_new = self.apply_rope(K_new, Rc, Rs)
 
@@ -128,15 +150,20 @@ class GroupRopeAttention(nn.Module):
         Lk = K.shape[2]  # longueur key totale
 
         # scores: [B, num_heads, Lq, Lk]
-        scores = torch.einsum('bgld,bgjd->bglj', Qs, K) / math.sqrt(self.hd)
+        if(self.qk_norm):
+            cores = torch.einsum('bgld,bgjd->bglj', Qs, K)
+        else:
+            scores = torch.einsum('bgld,bgjd->bglj', Qs, K) / math.sqrt(self.hd)
 
-        # causal mask adapté à (Lq, Lk) avec offset past_len
-        # masque j > (past_len + i)
-        causal_mask = torch.triu(
-            torch.ones((Lq, Lk), device=x.device, dtype=torch.bool),
-            diagonal=1 + past_len
-        )
-        scores = scores.masked_fill(causal_mask, float('-inf'))
+        if past_len == 0 and Lq == Lk and Lk <= self.max_seq_len:
+            scores = scores.masked_fill(self.causal_mask[:Lq, :Lk], float('-inf'))
+        else:
+            causal_mask = torch.triu(
+                torch.ones((Lq, Lk), device=x.device, dtype=torch.bool),
+                diagonal=1 + past_len
+            )
+            scores = scores.masked_fill(causal_mask, float('-inf'))
+
 
         atts = torch.softmax(scores, dim=-1)  # [B, num_heads, Lq, Lk]
 

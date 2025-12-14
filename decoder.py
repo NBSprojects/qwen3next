@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn 
 import torch.nn.functional as F
 
-from MoE import MoE
+from MoE import MoE, FFN
 from gqa import GroupRopeAttention
 
 class RMSNorm(nn.Module):
