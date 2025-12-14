@@ -47,7 +47,7 @@ class TrainConfig:
 
     block_size: int = 256  # context length FIXE
     batch_size: int = 32
-    num_workers: int = 2
+    num_workers: int = 4
 
     # --- Training ---
     max_steps: int = 10_000
@@ -231,6 +231,8 @@ def main():
         shuffle=True,
         drop_last=True,  # pour garder [B, block_size] constant
         num_workers=cfg.num_workers,
+        pin_memory=True,              
+        persistent_workers=True    
     )
     val_loader = DataLoader(
         val_dataset,
@@ -238,6 +240,8 @@ def main():
         shuffle=False,
         drop_last=True,
         num_workers=cfg.num_workers,
+        pin_memory=True,               # Prépare la RAM pour un transfert rapide vers le GPU
+        persistent_workers=True    
     )
 
     # ------------------------------------------------------------------ #
@@ -342,7 +346,7 @@ def main():
         global_step += 1
 
         # batch : [B, block_size]
-        batch = batch.to(device)
+        batch = batch.to(device, non_blocking=True)
 
         # input_ids pour le modèle : tous sauf le dernier token
         input_ids = batch[:, :-1]  # [B, block_size-1]
