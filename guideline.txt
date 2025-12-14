@@ -42,3 +42,24 @@ avoir un full module qui run l'inférence avec / sans KV cache et observer une a
 tester différents modes MHA, GQA, 
 
 
+
+
+voici un début de code que j'ai fait dans le cadre d'un projet scolaire sur les apports des nouvelles techniques pour les LLMs
+sur ce projet je travaille sur le KV Caching, GQA et MoE, le but est d'implémenter ces différentes techniques from scratch
+puis d'entrainer différents modeles qui utilisent ou non ces techniques, afin d'observer les effets. J'ai deja codé ces fichiers,
+je veux maintenant rajouter le module de train. Pour le train, j'ai prévu d'utiliser le dataset wikitext103, tokenizer de la meme maniere 
+pour les 3 expérimentations(baseline, baseline + GQA, baseline + GQA + MoE). 
+
+- Pour montrer l'efficacité des techniques j'ai prévu de faire la chose suivante : on bloque un nb de params entrainables actifs du modele, ainsi qu'un budget de train, et on mesure 2 métriques : 
+la perf en test finale, ainsi que le nb de tokens/s du modele obtenu de ce que j'ai compris, de cette maniere, on verra que :
+- GQA améliorera la perf val finale étant donné que l'on va augmenter le nb de tetes par rapport a la baseline (vu que le nb de params est fixé)
+je sais que théoriquement, GQA sert plutot a réduire la taille du KV cache et donc de permettre des contxtes beaucoup plus long 
+qui auparavant aurait fait en sorte que le KV cache prend beaucoup de temps a etre load sur le GPU 
+- GQA + MoE va augmenter la perf finale, puisque a meme nombre de params actifs, on va pouvoir augmenter de beaucoup le nb de params du modele
+
+Je veux que tu commences par me dire si le code que j'ai deja implémenté est pret a supporter cette expérimentation sans beaucoup de changement. 
+D'autre part, je n'ai pas beaucoup de temps pour expérimenter donc je veux utiliser le plus possible de torch compile, je veux donc que tu m'indiques a quel point mon code 
+est torch.compile ready (je compte mettre tout les use_kv_cache a False durant le train), quelles sont les précautions a prendre pour maximiser le rendement de torch compile 
+(fixer les shapes, comment le faire, ect)
+
+
