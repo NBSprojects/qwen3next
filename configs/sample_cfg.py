@@ -20,7 +20,7 @@ class SampleConfig(ModelConfig):
     measure_every: int = 64
 
     # Checkpoint
-    load_ckpt: bool = True
+    load_ckpt: bool = False
     ckpt_path: str = "model_train.ckpt"
 
     # Device
