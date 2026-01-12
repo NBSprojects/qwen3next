@@ -145,8 +145,6 @@ class DecoderOnlyLM(nn.Module):
         x = self.norm_out(x)           # [B, L, D]
         logits = self.lm_head(x)       # [B, L, vocab_size]
 
-        if(self.tie_embeddings):
-            logits *= 1 / math.sqrt(emb_dim)
 
         if load_balancing_losses:
             load_balancing_loss = torch.stack(load_balancing_losses).mean()

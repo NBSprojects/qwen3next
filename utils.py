@@ -1,0 +1,158 @@
+# utils.py
+import numpy as np
+import torch
+import torch.nn as nn
+import random
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def select_device(device_str: str) -> torch.device:
+    if device_str == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        raise RuntimeError("CUDA demandé mais non disponible.")
+    if device_str == "cpu":
+        return torch.device("cpu")
+    # auto
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def count_trainable_params(m: nn.Module) -> int:
+    return sum(p.numel() for p in m.parameters() if p.requires_grad)
+
+
+def compute_layer_grad_norms(model: nn.Module) -> dict:
+    """
+    Calcule la norme L2 moyenne des gradients par composant de chaque layer.
+    Retourne un dict {layer_idx: {"attn": norm, "ffn": norm, "norm": norm, "total": norm}}.
+    """
+    # Handle torch.compile wrapper
+    layers = getattr(model, '_orig_mod', model).layers
+    
+    grad_norms = {}
+    for layer_idx, layer in enumerate(layers):
+        component_grads = {"attn": [], "ffn": [], "norm": [], "total": []}
+        
+        for name, param in layer.named_parameters():
+            if param.grad is None:
+                continue
+            norm_val = param.grad.detach().norm().item()
+            component_grads["total"].append(norm_val)
+            
+            # Catégorisation par composant
+            if "gqa" in name:
+                component_grads["attn"].append(norm_val)
+            elif "moe" in name or "ffn" in name:
+                component_grads["ffn"].append(norm_val)
+            elif "norm" in name:
+                component_grads["norm"].append(norm_val)
+        
+        grad_norms[layer_idx] = {
+            k: sum(v) / len(v) if v else 0.0 
+            for k, v in component_grads.items()
+        }
+    return grad_norms
+
+
+def collect_layer_grad_norms(model: nn.Module, step: int, history: dict):
+    """
+    Collecte les normes moyennes des gradients par layer et les stocke dans history.
+    
+    Args:
+        model: Le modèle (potentiellement compilé avec torch.compile)
+        step: Le step actuel
+        history: Dict mutable {layer_idx: {"attn": [], "ffn": [], "steps": []}}
+    """
+    grad_norms = compute_layer_grad_norms(model)
+    for layer_idx, norms in grad_norms.items():
+        if layer_idx not in history:
+            history[layer_idx] = {"attn": [], "ffn": [], "steps": []}
+        history[layer_idx]["attn"].append(norms["attn"])
+        history[layer_idx]["ffn"].append(norms["ffn"])
+        history[layer_idx]["steps"].append(step)
+
+
+def plot_gradient_norms(
+    grad_norm_history: dict,
+    save_path: str = "analytics/gradient_norms.png",
+    use_moe: bool = True,
+    dpi: int = 150,
+):
+    """
+    Trace les courbes de gradient norms par layer (Attention et FFN/MoE) et sauvegarde l'image.
+    
+    Args:
+        grad_norm_history: Dict {layer_idx: {"attn": [], "ffn": [], "steps": []}}
+        save_path: Chemin de sauvegarde du fichier PNG
+        use_moe: True si modèle MoE, False si Dense (pour le titre)
+        dpi: Résolution de l'image
+    
+    Returns:
+        True si le plot a été généré, False sinon
+    """
+    if not grad_norm_history:
+        print("[WARN] Aucune donnée de gradient norm à tracer.")
+        return False
+    
+    n_layers = len(grad_norm_history)
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Palette de couleurs distinctes pour chaque layer
+    colors = plt.cm.viridis(np.linspace(0, 0.9, n_layers))
+    
+    # Plot Attention grad norms
+    ax_attn = axes[0]
+    for layer_idx in sorted(grad_norm_history.keys()):
+        data = grad_norm_history[layer_idx]
+        ax_attn.plot(
+            data["steps"], data["attn"],
+            label=f"Layer {layer_idx}",
+            color=colors[layer_idx],
+            alpha=0.8,
+            linewidth=1.2
+        )
+    ax_attn.set_xlabel("Step")
+    ax_attn.set_ylabel("Gradient Norm (L2)")
+    ax_attn.set_title("Attention Gradient Norms")
+    ax_attn.legend(loc="upper right", fontsize=8)
+    ax_attn.grid(True, alpha=0.3)
+    ax_attn.set_yscale("log")
+    
+    # Plot FFN/MoE grad norms
+    ax_ffn = axes[1]
+    for layer_idx in sorted(grad_norm_history.keys()):
+        data = grad_norm_history[layer_idx]
+        ax_ffn.plot(
+            data["steps"], data["ffn"],
+            label=f"Layer {layer_idx}",
+            color=colors[layer_idx],
+            alpha=0.8,
+            linewidth=1.2
+        )
+    ax_ffn.set_xlabel("Step")
+    ax_ffn.set_ylabel("Gradient Norm (L2)")
+    ax_ffn.set_title("FFN/MoE Gradient Norms")
+    ax_ffn.legend(loc="upper right", fontsize=8)
+    ax_ffn.grid(True, alpha=0.3)
+    ax_ffn.set_yscale("log")
+    
+    model_type = "MoE" if use_moe else "Dense"
+    fig.suptitle(f"Gradient Norms per Layer - {model_type} Model", fontsize=12)
+    plt.tight_layout()
+    
+    plt.savefig(save_path, dpi=dpi)
+    plt.close()
+    print(f"[INFO] Courbes de gradient norms sauvegardées dans {save_path}")
+    return True

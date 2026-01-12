@@ -14,13 +14,13 @@ import matplotlib.pyplot as plt
 
 from model import DecoderOnlyLM
 
-
+from configs import SampleConfig
 
 
 # ------------------------------------------------------------------- #
 #  CONFIG
 # ------------------------------------------------------------------- #
-
+'''
 @dataclass
 class BenchmarkConfig:
     # --- modèle ---
@@ -36,7 +36,7 @@ class BenchmarkConfig:
     gpt2_model_name: str = "gpt2"
 
     # --- sampling ---
-    max_new_tokens: int = 512
+    max_new_tokens: int = 256
     temperature: float = 1.0
     top_k: Optional[int] = 50
     top_p: Optional[float] = 0.9
@@ -49,12 +49,12 @@ class BenchmarkConfig:
     measure_every: int = 64
 
     # ckpt
-    load_ckpt: bool = False
+    load_ckpt: bool = True
     ckpt_path: str = "model_train.ckpt"
 
     # device: "cuda", "cpu" ou "auto"
     device: str = "cuda"
-
+'''
 
 # ------------------------------------------------------------------- #
 #  UTILS
@@ -205,7 +205,7 @@ def generate_with_timing(
 # ------------------------------------------------------------------- #
 
 def main():
-    cfg = BenchmarkConfig()
+    cfg = SampleConfig()
 
     # --- Device & dtype ---
     device = select_device(cfg)
@@ -243,9 +243,20 @@ def main():
     if cfg.load_ckpt:
         print(f"[INFO] Chargement du checkpoint depuis {cfg.ckpt_path}")
         state = torch.load(cfg.ckpt_path, map_location="cpu")
-        if isinstance(state, dict) and "model" in state:
-            state = state["model"]
-        missing, unexpected = model.load_state_dict(state, strict=False)
+        
+        # Clé correcte
+        if isinstance(state, dict) and "model_state_dict" in state:
+            state = state["model_state_dict"]
+        
+        # Retirer le préfixe _orig_mod. ajouté par torch.compile()
+        new_state = {}
+        for k, v in state.items():
+            if k.startswith("_orig_mod."):
+                new_state[k[len("_orig_mod."):]] = v
+            else:
+                new_state[k] = v
+        
+        missing, unexpected = model.load_state_dict(new_state, strict=False)
         print(f"[INFO] Keys manquantes : {len(missing)} ; keys inattendues : {len(unexpected)}")
 
     # --- Comptage des paramètres ---
@@ -335,7 +346,7 @@ def main():
         plt.title(f"Latence de génération (use_kv_cache={cfg.use_kv_cache})")
         plt.grid(True)
         plt.tight_layout()
-        out_path = "per_token_times.png"
+        out_path = "analytics/per_token_times.png"
         plt.savefig(out_path, dpi=150)
         plt.close()
         print(f"\n[INFO] Graphique sauvegardé dans {out_path}")

@@ -15,19 +15,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from datasets import load_dataset
 from transformers import GPT2TokenizerFast
 
 from model import DecoderOnlyLM, DecoderOnlyLMDense
+from utils import collect_layer_grad_norms, plot_gradient_norms, set_seed, select_device, count_trainable_params
+from dataprep import build_token_datasets
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from configs import TrainConfig
+
 # ------------------------------------------------------------------- #
 #  CONFIG
 # ------------------------------------------------------------------- #
 
+'''
 @dataclass
 class TrainConfig:
     # --- Modèle (identique à benchmark_sampling pour le MoE) ---
@@ -50,17 +54,18 @@ class TrainConfig:
     num_workers: int = 4
 
     # --- Training ---
-    max_steps: int = 10_000
+    max_steps: int = 2_000
     eval_interval: int = 200
     log_interval: int = 20
 
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
     min_lr: float = 1e-5  
     use_cosine_scheduler: bool = True
     weight_decay: float = 0.1
     betas: Tuple[float, float] = (0.9, 0.95)
     grad_clip: Optional[float] = 1.0
-    lambda_moe: float = 0.01  # coefficient pour le balancing loss
+    lambda_moe: float = 0.005  # coefficient pour le balancing loss
+    print_grad_every_n_steps: Optional[int] = 60  # None = désactivé
 
     seed: int = 147
 
@@ -68,102 +73,11 @@ class TrainConfig:
     device: str = "cuda"  # "cuda", "cpu" ou "auto"
 
     # --- Checkpoint ---
+    save_model: bool = False
     save_ckpt_path: str = "model_train.ckpt"
 
+'''
 
-# ------------------------------------------------------------------- #
-#  UTILS
-# ------------------------------------------------------------------- #
-
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def select_device(device_str: str) -> torch.device:
-    if device_str == "cuda":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        raise RuntimeError("CUDA demandé mais non disponible.")
-    if device_str == "cpu":
-        return torch.device("cpu")
-    # auto
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def count_trainable_params(m: nn.Module) -> int:
-    return sum(p.numel() for p in m.parameters() if p.requires_grad)
-
-
-# ------------------------------------------------------------------- #
-#  DATASET : fixed-length token blocks
-# ------------------------------------------------------------------- #
-
-class TokenBlockDataset(Dataset):
-    """
-    Dataset qui prend un gros vecteur 1D de token ids et le découpe
-    en blocks de taille fixe block_size.
-    """
-
-    def __init__(self, all_ids: torch.Tensor, block_size: int):
-        assert all_ids.dtype == torch.long
-        self.block_size = block_size
-
-        # Troncature pour être multiple de block_size
-        n_blocks = all_ids.numel() // block_size
-        all_ids = all_ids[: n_blocks * block_size]
-
-        self.data = all_ids.view(n_blocks, block_size)  # [n_blocks, block_size]
-
-    def __len__(self):
-        return self.data.size(0)
-
-    def __getitem__(self, idx):
-        # retour : [block_size]
-        return self.data[idx]
-
-
-def build_token_datasets(cfg: TrainConfig, tokenizer: GPT2TokenizerFast):
-    """
-    Charge WikiText-103, tokenize avec GPT-2 BPE, et renvoie
-    deux TokenBlockDataset (train/val) avec block_size fixe.
-    """
-    print("[INFO] Chargement du dataset WikiText-103...")
-    ds = load_dataset(cfg.dataset_name, cfg.dataset_config)
-
-    train_texts = ds["train"]["text"]
-    val_texts = ds["validation"]["text"]
-
-    def tokenize_split(texts: List[str]) -> torch.Tensor:
-        all_ids: List[int] = []
-        for t in texts:
-            t = t.strip()
-            if not t:
-                continue
-            ids = tokenizer.encode(t, add_special_tokens=False)
-            if len(ids) == 0:
-                continue
-            all_ids.extend(ids)
-        return torch.tensor(all_ids, dtype=torch.long)
-
-    print("[INFO] Tokenization train...")
-    train_ids = tokenize_split(train_texts)
-    print(f"[INFO] Nombre total de tokens train : {train_ids.numel():,}")
-
-    print("[INFO] Tokenization val...")
-    val_ids = tokenize_split(val_texts)
-    print(f"[INFO] Nombre total de tokens val   : {val_ids.numel():,}")
-
-    train_dataset = TokenBlockDataset(train_ids, cfg.block_size)
-    val_dataset = TokenBlockDataset(val_ids, cfg.block_size)
-
-    print(f"[INFO] Nombre de séquences train : {len(train_dataset)}")
-    print(f"[INFO] Nombre de séquences val   : {len(val_dataset)}")
-
-    return train_dataset, val_dataset
 
 
 
@@ -177,6 +91,7 @@ def evaluate(model: nn.Module, val_loader: DataLoader, device: torch.device, cfg
     """
     Évalue la perplexité (loss) sur une partie du val set.
     """
+
     model.eval()
     losses = []
 
@@ -335,6 +250,7 @@ def main():
 
     train_losses = []
     eval_losses = []
+    grad_norm_history = {}  # {layer_idx: {"attn": [], "ffn": [], "steps": []}}
 
     while global_step < cfg.max_steps:
         try:
@@ -375,6 +291,10 @@ def main():
 
         optimizer.zero_grad()
         loss.backward()
+
+        # Gradient monitoring
+        if cfg.print_grad_every_n_steps is not None and global_step % cfg.print_grad_every_n_steps == 0:
+            collect_layer_grad_norms(model, global_step, grad_norm_history)
 
         if cfg.grad_clip is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -443,15 +363,18 @@ def main():
     # Sauvegarde du checkpoint
     # ------------------------------------------------------------------ #
 
-    ckpt = {
-        "config": cfg.__dict__,
-        "model_state_dict": model.state_dict(),
-        "tokenizer_name": cfg.gpt2_model_name,
-        "vocab_size": vocab_size,
-        "use_moe": cfg.use_moe,
-    }
-    torch.save(ckpt, cfg.save_ckpt_path)
-    print(f"[INFO] Checkpoint sauvegardé dans {cfg.save_ckpt_path}")
+    if(cfg.save_model):
+        ckpt = {
+            "config": cfg.__dict__,
+            "model_state_dict": model.state_dict(),
+            "tokenizer_name": cfg.gpt2_model_name,
+            "vocab_size": vocab_size,
+            "use_moe": cfg.use_moe,
+        }
+        torch.save(ckpt, cfg.save_ckpt_path)
+        print(f"[INFO] Checkpoint sauvegardé dans {cfg.save_ckpt_path}")
+    else:
+        print(f"[INFO] Checkpoint non sauvegardé")
 
     # Plotting des courbes de loss
     if train_losses or eval_losses:
@@ -472,10 +395,13 @@ def main():
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
-        plot_path = "training_curves.png"
+        plot_path = "analytics/training_curves.png"
         plt.savefig(plot_path, dpi=150)
         plt.close()
         print(f"[INFO] Courbes de loss sauvegardées dans {plot_path}")
+    
+    # Plotting des gradient norms
+    plot_gradient_norms(grad_norm_history, save_path="analytics/gradient_norms.png", use_moe=cfg.use_moe)
 
 
 if __name__ == "__main__":
