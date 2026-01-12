@@ -151,7 +151,7 @@ class GroupRopeAttention(nn.Module):
 
         # scores: [B, num_heads, Lq, Lk]
         if(self.qk_norm):
-            cores = torch.einsum('bgld,bgjd->bglj', Qs, K)
+            scores = torch.einsum('bgld,bgjd->bglj', Qs, K)
         else:
             scores = torch.einsum('bgld,bgjd->bglj', Qs, K) / math.sqrt(self.hd)
 

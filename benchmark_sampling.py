@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 from model import DecoderOnlyLM
 
 
+
+
 # ------------------------------------------------------------------- #
 #  CONFIG
 # ------------------------------------------------------------------- #
@@ -34,11 +36,11 @@ class BenchmarkConfig:
     gpt2_model_name: str = "gpt2"
 
     # --- sampling ---
-    max_new_tokens: int = 4096
+    max_new_tokens: int = 512
     temperature: float = 1.0
     top_k: Optional[int] = 50
     top_p: Optional[float] = 0.9
-    use_kv_cache: bool = False
+    use_kv_cache: bool = True
 
     # prompt
     prompt: str = "Once upon a time"
@@ -48,7 +50,7 @@ class BenchmarkConfig:
 
     # ckpt
     load_ckpt: bool = False
-    ckpt_path: str = "model_ckpt.pt"
+    ckpt_path: str = "model_train.ckpt"
 
     # device: "cuda", "cpu" ou "auto"
     device: str = "cuda"
@@ -303,7 +305,6 @@ def main():
     )
 
     # --- Décodage du texte (optionnel, juste pour vérif) ---
-    '''
     try:
         gen_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         print("\n[GENERATION SAMPLE]")
@@ -311,7 +312,6 @@ def main():
         print()
     except Exception as e:
         print(f"[WARN] Erreur lors du decode du texte : {e}")
-    '''
 
     print(f"\n[TOTAL]")
     print(f"  Tokens générés : {total_new}")

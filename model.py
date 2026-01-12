@@ -3,9 +3,18 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from typing import Optional 
 
 from decoder import DecoderGQALayer, RMSNorm, DecoderGQALayerDense
+
+def _init_weights(module: nn.Module, std: float = 0.02):
+    if isinstance(module, nn.Linear):
+        nn.init.normal_(module.weight, mean=0.0, std=std)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=std)
 
 
 class DecoderOnlyLM(nn.Module):
@@ -26,6 +35,7 @@ class DecoderOnlyLM(nn.Module):
       tie_embeddings    : si True, lm_head partage les poids avec l'embedding
     """
 
+
     def __init__(
         self,
         vocab_size: int,
@@ -43,6 +53,7 @@ class DecoderOnlyLM(nn.Module):
         self.emb_dim = emb_dim
         self.n_layers = n_layers
         self.num_groups = num_groups
+        self.tie_embeddings = tie_embeddings
 
         # Embedding de tokens
         self.tok_emb = nn.Embedding(vocab_size, emb_dim)
@@ -68,8 +79,12 @@ class DecoderOnlyLM(nn.Module):
         self.lm_head = nn.Linear(emb_dim, vocab_size, bias=False)
 
         # Option : tie embeddings (comme GPT / LLaMA)
-        if tie_embeddings:
+        if self.tie_embeddings:
             self.lm_head.weight = self.tok_emb.weight
+
+        self.apply(lambda m: _init_weights(m, std=0.02))
+
+    
 
     # ------------------------------------------------------------------ #
     #  FORWARD : passe standard, avec ou sans KV cache
@@ -102,6 +117,7 @@ class DecoderOnlyLM(nn.Module):
 
         # Embedding [B, L, D]
         x = self.tok_emb(input_ids)
+        emb_dim = x.shape[-1]
 
         load_balancing_losses = []
 
@@ -128,6 +144,9 @@ class DecoderOnlyLM(nn.Module):
         # Norm finale + tête de langage
         x = self.norm_out(x)           # [B, L, D]
         logits = self.lm_head(x)       # [B, L, vocab_size]
+
+        if(self.tie_embeddings):
+            logits *= 1 / math.sqrt(emb_dim)
 
         if load_balancing_losses:
             load_balancing_loss = torch.stack(load_balancing_losses).mean()

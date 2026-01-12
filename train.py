@@ -54,7 +54,7 @@ class TrainConfig:
     eval_interval: int = 200
     log_interval: int = 20
 
-    learning_rate: float = 1e-4
+    learning_rate: float = 3e-4
     min_lr: float = 1e-5  
     use_cosine_scheduler: bool = True
     weight_decay: float = 0.1
