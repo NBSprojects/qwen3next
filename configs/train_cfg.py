@@ -14,12 +14,14 @@ class TrainConfig(ModelConfig):
     num_workers: int = 4
 
     # --- Training ---
-    max_steps: int = 20_000
+    max_steps: int = 2_000
     eval_interval: int = 200
     log_interval: int = 20
 
     learning_rate: float = 1e-4
     min_lr: float = 1e-5
+    warmup_steps: int = 200            # 0 pour désactiver
+    warmup_start_factor: float = 0.1   # lr démarre à lr * start_factor
     use_cosine_scheduler: bool = True
     weight_decay: float = 0.1
     betas: Tuple[float, float] = (0.9, 0.95)

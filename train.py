@@ -18,7 +18,14 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import GPT2TokenizerFast
 
 from model import DecoderOnlyLM, DecoderOnlyLMDense
-from utils import collect_layer_grad_norms, plot_gradient_norms, set_seed, select_device, count_trainable_params
+from utils import (
+    collect_layer_grad_norms,
+    plot_gradient_norms,
+    plot_training_curves,
+    set_seed,
+    select_device,
+    count_trainable_params,
+)
 from dataprep import build_token_datasets
 
 import matplotlib
@@ -26,59 +33,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from configs import TrainConfig
-
-# ------------------------------------------------------------------- #
-#  CONFIG
-# ------------------------------------------------------------------- #
-
-'''
-@dataclass
-class TrainConfig:
-    # --- Modèle (identique à benchmark_sampling pour le MoE) ---
-    n_layers: int = 4
-    emb_dim: int = 512
-    num_groups: int = 4
-    heads_per_group: int = 4
-    active_experts: int = 2
-    total_experts: int = 8
-    tie_embeddings: bool = True
-    use_moe: bool = True  # True = GQA+MoE, False = GQA+Dense
-
-    # --- Données ---
-    gpt2_model_name: str = "gpt2"
-    dataset_name: str = "wikitext"
-    dataset_config: str = "wikitext-103-v1"
-
-    block_size: int = 256  # context length FIXE
-    batch_size: int = 32
-    num_workers: int = 4
-
-    # --- Training ---
-    max_steps: int = 2_000
-    eval_interval: int = 200
-    log_interval: int = 20
-
-    learning_rate: float = 1e-4
-    min_lr: float = 1e-5  
-    use_cosine_scheduler: bool = True
-    weight_decay: float = 0.1
-    betas: Tuple[float, float] = (0.9, 0.95)
-    grad_clip: Optional[float] = 1.0
-    lambda_moe: float = 0.005  # coefficient pour le balancing loss
-    print_grad_every_n_steps: Optional[int] = 60  # None = désactivé
-
-    seed: int = 147
-
-    # --- Device ---
-    device: str = "cuda"  # "cuda", "cpu" ou "auto"
-
-    # --- Checkpoint ---
-    save_model: bool = False
-    save_ckpt_path: str = "model_train.ckpt"
-
-'''
-
-
 
 
 
@@ -289,11 +243,11 @@ def main():
         else:
             loss = loss_ce
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         loss.backward()
 
         # Gradient monitoring
-        if cfg.print_grad_every_n_steps is not None and global_step % cfg.print_grad_every_n_steps == 0:
+        if cfg.grad_log_interval is not None and global_step % cfg.grad_log_interval == 0:
             collect_layer_grad_norms(model, global_step, grad_norm_history)
 
         if cfg.grad_clip is not None:
@@ -335,10 +289,12 @@ def main():
 
             loss_ce_val = float(loss_ce.detach().cpu())
             train_losses.append((global_step, loss_ce_val))
+            current_lr = optimizer.param_groups[0]["lr"]
 
             print(
                 f"[step {global_step:05d}] "
                 f"loss={float(loss.detach().cpu()):.4f} "
+                f"lr={current_lr:.2e}"
                 f"(ce={float(loss_ce.detach().cpu()):.4f}, lb={lb_val:.4f}) "
                 f"| steps/s={steps_per_sec:.2f}"
                 f"{tokens_per_expert_str}"
@@ -377,28 +333,12 @@ def main():
         print(f"[INFO] Checkpoint non sauvegardé")
 
     # Plotting des courbes de loss
-    if train_losses or eval_losses:
-        plt.figure(figsize=(10, 6))
-        
-        if train_losses:
-            train_steps, train_vals = zip(*train_losses)
-            plt.plot(train_steps, train_vals, label="Train Loss (CE)", color="blue", alpha=0.7)
-        
-        if eval_losses:
-            eval_steps, eval_vals = zip(*eval_losses)
-            plt.plot(eval_steps, eval_vals, label="Eval Loss", color="red", marker="o", linewidth=2)
-        
-        plt.xlabel("Step")
-        plt.ylabel("Loss (Cross-Entropy)")
-        plt.title(f"Training Curves - {'MoE' if cfg.use_moe else 'Dense'} Model")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        plot_path = "analytics/training_curves.png"
-        plt.savefig(plot_path, dpi=150)
-        plt.close()
-        print(f"[INFO] Courbes de loss sauvegardées dans {plot_path}")
+    plot_training_curves(
+        train_losses,
+        eval_losses,
+        save_path="analytics/training_curves.png",
+        use_moe=cfg.use_moe,
+    )
     
     # Plotting des gradient norms
     plot_gradient_norms(grad_norm_history, save_path="analytics/gradient_norms.png", use_moe=cfg.use_moe)

@@ -64,7 +64,7 @@ def count_trainable_params(m: nn.Module) -> int:
     return sum(p.numel() for p in m.parameters() if p.requires_grad)
 
 
-def select_device(cfg: BenchmarkConfig) -> torch.device:
+def select_device(cfg: SampleConfig) -> torch.device:
     if cfg.device == "cuda":
         if torch.cuda.is_available():
             return torch.device("cuda")

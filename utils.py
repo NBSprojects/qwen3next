@@ -64,6 +64,53 @@ def compute_layer_grad_norms(model: nn.Module) -> dict:
         }
     return grad_norms
 
+def plot_training_curves(
+    train_losses: list,
+    eval_losses: list,
+    save_path: str = "analytics/training_curves.png",
+    use_moe: bool = True,
+    dpi: int = 150,
+):
+    """
+    Trace les courbes de loss (train et eval) et sauvegarde l'image.
+    
+    Args:
+        train_losses: Liste de tuples (step, loss_value)
+        eval_losses: Liste de tuples (step, loss_value)
+        save_path: Chemin de sauvegarde du fichier PNG
+        use_moe: True si modèle MoE, False si Dense (pour le titre)
+        dpi: Résolution de l'image
+    
+    Returns:
+        True si le plot a été généré, False sinon
+    """
+    if not train_losses and not eval_losses:
+        print("[WARN] Aucune donnée de loss à tracer.")
+        return False
+    
+    plt.figure(figsize=(10, 6))
+    
+    if train_losses:
+        train_steps, train_vals = zip(*train_losses)
+        plt.plot(train_steps, train_vals, label="Train Loss (CE)", color="blue", alpha=0.7)
+    
+    if eval_losses:
+        eval_steps, eval_vals = zip(*eval_losses)
+        plt.plot(eval_steps, eval_vals, label="Eval Loss", color="red", marker="o", linewidth=2)
+    
+    plt.xlabel("Step")
+    plt.ylabel("Loss (Cross-Entropy)")
+    model_type = "MoE" if use_moe else "Dense"
+    plt.title(f"Training Curves - {model_type} Model")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    plt.savefig(save_path, dpi=dpi)
+    plt.close()
+    print(f"[INFO] Courbes de loss sauvegardées dans {save_path}")
+    return True
+
 
 def collect_layer_grad_norms(model: nn.Module, step: int, history: dict):
     """
