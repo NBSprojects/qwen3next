@@ -182,13 +182,31 @@ def main():
         print("[INFO] AdamW(fused=False)")
 
 
+    # ------------------------------------------------------------------ #
+    # Scheduler OneCycleLR
+    # ------------------------------------------------------------------ #
     scheduler = None
-    if cfg.use_cosine_scheduler:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    if cfg.use_onecycle_scheduler:
+        # Calcul de final_div_factor à partir de min_lr
+        # OneCycleLR: final_lr = initial_lr / final_div_factor
+        #             initial_lr = max_lr / div_factor
+        # Donc: final_lr = max_lr / div_factor / final_div_factor
+        # => final_div_factor = (max_lr / div_factor) / min_lr
+        initial_lr = cfg.learning_rate / cfg.div_factor
+        final_div_factor = initial_lr / cfg.min_lr if cfg.min_lr > 0 else 1e4
+        
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
-            T_max=cfg.max_steps,
-            eta_min=cfg.min_lr,
+            max_lr=cfg.learning_rate,
+            total_steps=cfg.max_steps,
+            pct_start=cfg.pct_start,
+            anneal_strategy=cfg.anneal_strategy,
+            div_factor=cfg.div_factor,
+            final_div_factor=final_div_factor,
         )
+        print(f"[INFO] OneCycleLR: max_lr={cfg.learning_rate:.2e}, "
+              f"pct_start={cfg.pct_start}, div_factor={cfg.div_factor}, "
+              f"final_div_factor={final_div_factor:.1f}, anneal={cfg.anneal_strategy}")
 
 
     # ------------------------------------------------------------------ #

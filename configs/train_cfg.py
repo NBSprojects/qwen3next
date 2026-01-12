@@ -20,9 +20,13 @@ class TrainConfig(ModelConfig):
 
     learning_rate: float = 1e-4
     min_lr: float = 1e-5
-    warmup_steps: int = 200            # 0 pour désactiver
-    warmup_start_factor: float = 0.1   # lr démarre à lr * start_factor
-    use_cosine_scheduler: bool = True
+
+    # OneCycleLR parameters
+    use_onecycle_scheduler: bool = True   
+    pct_start: float = 0.1                # fraction du training pour le warmup (ex: 0.1 = 10%)
+    anneal_strategy: str = "cos"          
+    div_factor: float = 10.0              # initial_lr = max_lr / div_factor
+
     weight_decay: float = 0.1
     betas: Tuple[float, float] = (0.9, 0.95)
     grad_clip: Optional[float] = 1.0
