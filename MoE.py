@@ -76,10 +76,10 @@ class MoE(nn.Module):
 
         # --- Router ---
         logits = self.gate_layer(x)                 # [bs, seq_len, num_exp]
-        probs = F.softmax(logits, dim=-1)
+        probs = F.softmax(logits, dim=-1, dtype=torch.float32)
 
         # probs_lbl for balancing loss (detached input)
-        probs_lbl = F.softmax(self.gate_layer(x.detach()), dim=-1)
+        probs_lbl = F.softmax(self.gate_layer(x.detach()), dim=-1, dtype=torch.float32)
 
         topk_vals, topk_inds = torch.topk(probs, self.k, dim=-1)  # [bs, seq_len, k]
         cl_values = topk_vals / (topk_vals.sum(dim=-1, keepdim=True) + 1e-9)  # [bs, seq_len, k]
@@ -180,5 +180,5 @@ class MoE(nn.Module):
 
         balancing_loss = torch.sum(p * f)
 
-        return moe_output, balancing_loss
+        return moe_output.to(x.dtype), balancing_loss.to(x.dtype)
 

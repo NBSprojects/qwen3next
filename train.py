@@ -20,8 +20,10 @@ from transformers import GPT2TokenizerFast
 from model import DecoderOnlyLM, DecoderOnlyLMDense
 from utils import (
     collect_layer_grad_norms,
+    collect_layer_activation_stats,
     plot_gradient_norms,
     plot_training_curves,
+    plot_activation_stats,
     set_seed,
     select_device,
     count_trainable_params,
@@ -223,7 +225,7 @@ def main():
     train_losses = []
     eval_losses = []
     grad_norm_history = {}  # {layer_idx: {"attn": [], "ffn": [], "steps": []}}
-
+    activation_history = {}  # {layer_idx: {"mean": [], "std": [], "steps": []}}
     while global_step < cfg.max_steps:
         try:
             batch = next(train_iter)
@@ -330,6 +332,10 @@ def main():
                 f"val_loss={val_loss:.4f} | val_ppl={val_ppl:.2f}"
             )
 
+        # Activation monitoring (mean/std par layer)
+        if ( cfg.activation_log_interval is not None and global_step % cfg.activation_log_interval == 0):
+            collect_layer_activation_stats(model, input_ids, global_step, activation_history)
+
         if global_step >= cfg.max_steps:
             break
 
@@ -360,6 +366,9 @@ def main():
     
     # Plotting des gradient norms
     plot_gradient_norms(grad_norm_history, save_path="analytics/gradient_norms.png", use_moe=cfg.use_moe)
+    
+    # Plotting des activation stats
+    plot_activation_stats(activation_history, save_path="analytics/activation_stats.png", use_moe=cfg.use_moe)
 
 
 if __name__ == "__main__":

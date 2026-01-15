@@ -32,8 +32,9 @@ class TrainConfig(ModelConfig):
     grad_clip: Optional[float] = 1.0
     lambda_moe: float = 0.005
     grad_log_interval: Optional[int] = 60
+    activation_log_interval: Optional[int] = 60
 
-    seed: int = 147
+    seed: int = 70
     use_moe: bool = True
 
     # --- Device ---

@@ -203,3 +203,151 @@ def plot_gradient_norms(
     plt.close()
     print(f"[INFO] Courbes de gradient norms sauvegardées dans {save_path}")
     return True
+
+# ------------------------------------------------------------------- #
+#  ACTIVATION STATS (mean/std) — safe w/ torch.compile
+# ------------------------------------------------------------------- #
+
+@torch.no_grad()
+def compute_layer_activation_stats(
+    model: nn.Module,
+    input_ids: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Calcule (mean, std) des activations *en sortie de chaque layer*.
+
+    Important pour le throughput avec torch.compile :
+    - on n'utilise PAS de hooks (souvent source de graph breaks)
+    - on passe par le modèle d'origine (model._orig_mod) si le modèle est compilé
+    - on ne fait qu'un seul transfert CPU à la fin (pas de .item() dans la boucle)
+
+    Args:
+        model: modèle (potentiellement torch.compile)
+        input_ids: LongTensor [B, L] sur le device
+
+    Returns:
+        means: Tensor [n_layers] (float32)
+        stds : Tensor [n_layers] (float32)
+    """
+
+    # Handle torch.compile wrapper
+    m = getattr(model, "_orig_mod", model)
+
+    # Forward manuel (équivalent à model.forward avec use_cache=False)
+    x = m.tok_emb(input_ids)
+
+    means = []
+    stds = []
+    for layer in m.layers:
+        x, _ = layer(x, kv_cache=None, use_cache=False)
+
+        # Varmean en 1 passe. correction=0 => variance population (pas "unbiased").
+        var, mean = torch.var_mean(x.to(torch.float32), dim=None, correction=0)
+        means.append(mean)
+        stds.append(torch.sqrt(var))
+
+    return torch.stack(means, dim=0), torch.stack(stds, dim=0)
+
+
+def collect_layer_activation_stats(
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    step: int,
+    history: dict
+):
+    """
+    Collecte mean/std des activations par layer et les stocke dans history.
+
+    Structure :
+        history[layer_idx] = {"mean": [...], "std": [...], "steps": [...]}
+
+    Note perf : cette collecte fait un forward additionnel en no_grad,
+    uniquement aux steps demandés (cf. cfg.activation_log_interval).
+    """
+
+    means, stds = compute_layer_activation_stats(model, input_ids)
+
+    # 1 seul transfert CPU (vecteurs de taille n_layers)
+    means_list = means.detach().cpu().tolist()
+    stds_list = stds.detach().cpu().tolist()
+
+    for layer_idx, (mval, sval) in enumerate(zip(means_list, stds_list)):
+        if layer_idx not in history:
+            history[layer_idx] = {"mean": [], "std": [], "steps": []}
+        history[layer_idx]["mean"].append(float(mval))
+        history[layer_idx]["std"].append(float(sval))
+        history[layer_idx]["steps"].append(step)
+
+
+def plot_activation_stats(
+    activation_history: dict,
+    save_path: str = "analytics/activation_stats.png",
+    use_moe: bool = True,
+    dpi: int = 150,
+):
+    """
+    Trace les courbes mean/std des activations par layer et sauvegarde l'image.
+
+    Args:
+        activation_history: Dict {layer_idx: {"mean": [], "std": [], "steps": []}}
+        save_path: Chemin de sauvegarde du fichier PNG
+        use_moe: True si modèle MoE, False si Dense (pour le titre)
+        dpi: Résolution de l'image
+
+    Returns:
+        True si le plot a été généré, False sinon
+    """
+
+    if not activation_history:
+        print("[WARN] Aucune donnée d'activation stats à tracer.")
+        return False
+
+    n_layers = len(activation_history)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    colors = plt.cm.viridis(np.linspace(0, 0.9, n_layers))
+
+    # Mean
+    ax_mean = axes[0]
+    for layer_idx in sorted(activation_history.keys()):
+        data = activation_history[layer_idx]
+        ax_mean.plot(
+            data["steps"],
+            data["mean"],
+            label=f"Layer {layer_idx}",
+            color=colors[layer_idx],
+            alpha=0.8,
+            linewidth=1.2,
+        )
+    ax_mean.set_xlabel("Step")
+    ax_mean.set_ylabel("Mean(x)")
+    ax_mean.set_title("Activation Mean per Layer")
+    ax_mean.legend(loc="upper right", fontsize=8)
+    ax_mean.grid(True, alpha=0.3)
+
+    # Std
+    ax_std = axes[1]
+    for layer_idx in sorted(activation_history.keys()):
+        data = activation_history[layer_idx]
+        ax_std.plot(
+            data["steps"],
+            data["std"],
+            label=f"Layer {layer_idx}",
+            color=colors[layer_idx],
+            alpha=0.8,
+            linewidth=1.2,
+        )
+    ax_std.set_xlabel("Step")
+    ax_std.set_ylabel("Std(x)")
+    ax_std.set_title("Activation Std per Layer")
+    ax_std.legend(loc="upper right", fontsize=8)
+    ax_std.grid(True, alpha=0.3)
+
+    model_type = "MoE" if use_moe else "Dense"
+    fig.suptitle(f"Activation Stats per Layer - {model_type} Model", fontsize=12)
+    plt.tight_layout()
+
+    plt.savefig(save_path, dpi=dpi)
+    plt.close()
+    print(f"[INFO] Activation stats sauvegardées dans {save_path}")
+    return True

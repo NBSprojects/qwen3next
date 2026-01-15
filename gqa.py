@@ -164,8 +164,8 @@ class GroupRopeAttention(nn.Module):
             )
             scores = scores.masked_fill(causal_mask, float('-inf'))
 
-
-        atts = torch.softmax(scores, dim=-1)  # [B, num_heads, Lq, Lk]
+        # softmax en float32 pour éviter les problèmes de stabilité
+        atts = torch.softmax(scores, dim=-1, dtype=torch.float32).to(scores.dtype)  # [B, num_heads, Lq, Lk]
 
         # out: [B, num_heads, Lq, hd]
         otps = torch.einsum('bgij,bgjk->bgik', atts, V)
