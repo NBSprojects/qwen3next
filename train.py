@@ -27,6 +27,10 @@ from utils import (
     set_seed,
     select_device,
     count_trainable_params,
+    param_groups_for_wd,
+    get_avg_tokens_per_expert,
+    kl_to_uniform_from_counts,
+    plot_moe_kl_curve,
 )
 from dataprep import build_token_datasets
 
@@ -167,19 +171,17 @@ def main():
     # On essaye fused=True si dispo
     try:
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            param_groups_for_wd(model, cfg.weight_decay),
             lr=cfg.learning_rate,
             betas=cfg.betas,
-            weight_decay=cfg.weight_decay,
-            fused=True,
+            fused=True,  
         )
         print("[INFO] AdamW(fused=True)")
     except TypeError:
         optimizer = torch.optim.AdamW(
-            model.parameters(),
+            param_groups_for_wd(model, cfg.weight_decay),
             lr=cfg.learning_rate,
             betas=cfg.betas,
-            weight_decay=cfg.weight_decay,
         )
         print("[INFO] AdamW(fused=False)")
 
@@ -226,6 +228,8 @@ def main():
     eval_losses = []
     grad_norm_history = {}  # {layer_idx: {"attn": [], "ffn": [], "steps": []}}
     activation_history = {}  # {layer_idx: {"mean": [], "std": [], "steps": []}}
+    moe_kl_history = []
+
     while global_step < cfg.max_steps:
         try:
             batch = next(train_iter)
@@ -283,22 +287,6 @@ def main():
         step_time = step_end - step_start
         steps_per_sec = 1.0 / step_time if step_time > 0 else float("inf")
 
-        # Stats MoE : tokens moyens par expert
-        tokens_per_expert_str = ""
-        if cfg.use_moe:
-            tokens_per_expert_layers = []
-            for layer in model.layers:
-                moe = getattr(layer, "moe", None)
-                if moe is not None and moe.last_tokens_per_expert is not None:
-                    # last_tokens_per_expert : [num_exp], float32, no_grad
-                    tokens_per_expert_layers.append(moe.last_tokens_per_expert.detach())
-            if tokens_per_expert_layers:
-                stacked = torch.stack(tokens_per_expert_layers, dim=0)  # [n_layers, num_exp]
-                avg_tokens_per_expert = stacked.mean(dim=0)             # [num_exp]
-                tokens_per_expert_list = avg_tokens_per_expert.cpu().tolist()
-                tokens_per_expert_str = " | tokens/expert=" + ", ".join(
-                    f"{v:.1f}" for v in tokens_per_expert_list
-                )
 
         # Logging
         if global_step % cfg.log_interval == 0:
@@ -317,7 +305,6 @@ def main():
                 f"lr={current_lr:.2e}"
                 f"(ce={float(loss_ce.detach().cpu()):.4f}, lb={lb_val:.4f}) "
                 f"| steps/s={steps_per_sec:.2f}"
-                f"{tokens_per_expert_str}"
             )
 
         # Éval régulière
@@ -335,6 +322,15 @@ def main():
         # Activation monitoring (mean/std par layer)
         if ( cfg.activation_log_interval is not None and global_step % cfg.activation_log_interval == 0):
             collect_layer_activation_stats(model, input_ids, global_step, activation_history)
+
+        # MoE KL monitoring (token distribution vs uniform)
+        if (cfg.use_moe 
+            and cfg.moe_kl_log_interval is not None 
+            and global_step % cfg.moe_kl_log_interval == 0):
+            avg_counts = get_avg_tokens_per_expert(model)
+            if avg_counts is not None:
+                kl_val = kl_to_uniform_from_counts(avg_counts)
+                moe_kl_history.append((global_step, kl_val.item()))
 
         if global_step >= cfg.max_steps:
             break
@@ -369,6 +365,12 @@ def main():
     
     # Plotting des activation stats
     plot_activation_stats(activation_history, save_path="analytics/activation_stats.png", use_moe=cfg.use_moe)
+
+    # Plotting des MoE KL stats (distribution tokens/expert vs uniforme)
+    if cfg.use_moe:
+        plot_moe_kl_curve("analytics", moe_kl_history)
+
+
 
 
 if __name__ == "__main__":

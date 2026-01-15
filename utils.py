@@ -3,6 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import random
+import math
+import os
+from typing import Optional, List, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -27,6 +30,19 @@ def select_device(device_str: str) -> torch.device:
     # auto
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+def param_groups_for_wd(model: nn.Module, weight_decay: float):
+    decay, no_decay = [], []
+    for _, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        # règle simple (style nanoGPT) : matrices => decay ; vecteurs => no_decay
+        (decay if p.ndim >= 2 else no_decay).append(p)
+
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
 
 def count_trainable_params(m: nn.Module) -> int:
     return sum(p.numel() for p in m.parameters() if p.requires_grad)
@@ -351,3 +367,90 @@ def plot_activation_stats(
     plt.close()
     print(f"[INFO] Activation stats sauvegardées dans {save_path}")
     return True
+
+
+def unwrap_compiled_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Si model est torch.compile(...) wrapper, renvoie le vrai module."""
+    return model._orig_mod if hasattr(model, "_orig_mod") else model
+
+
+def get_avg_tokens_per_expert(model: torch.nn.Module) -> Optional[torch.Tensor]:
+    """
+    Retourne un Tensor [num_experts] = moyenne (sur les couches MoE)
+    de last_tokens_per_expert.
+
+    Important: utilise .detach() pour ne pas accrocher d'autograd graph.
+    """
+    model = unwrap_compiled_model(model)
+
+    tpe_list = []
+
+    # Chemin "standard" dans ton code: model.layers[*].moe
+    layers = getattr(model, "layers", None)
+    if layers is not None:
+        for layer in layers:
+            moe = getattr(layer, "moe", None)
+            if moe is None:
+                continue
+            t = getattr(moe, "last_tokens_per_expert", None)
+            if isinstance(t, torch.Tensor) and t.numel() > 0:
+                tpe_list.append(t.detach().float())
+    else:
+        # fallback générique
+        for m in model.modules():
+            t = getattr(m, "last_tokens_per_expert", None)
+            if isinstance(t, torch.Tensor) and t.numel() > 0:
+                tpe_list.append(t.detach().float())
+
+    if not tpe_list:
+        return None
+
+    return torch.stack(tpe_list, dim=0).mean(dim=0)  # [E]
+
+
+def kl_to_uniform_from_counts(counts: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    KL(p || u) où:
+      - p = distribution empirique = counts / sum(counts)
+      - u = uniforme = 1/E
+
+    Retourne un scalaire tensor (sur le même device).
+    """
+    # counts: [E]
+    counts = counts.detach().float()
+    E = counts.numel()
+    if E == 0:
+        return counts.new_zeros(())
+
+    # p strictement > 0 pour log
+    p = counts.clamp_min(0.0) + eps
+    p = p / p.sum()
+
+    # KL(p||u) = Σ p_i * log(p_i / (1/E)) = Σ p_i * (log p_i + log E)
+    return torch.sum(p * (torch.log(p) + math.log(E)))
+
+
+def plot_moe_kl_curve(output_dir: str, moe_kl_history: List[Tuple[int, float]]):
+    """
+    Trace KL(p||U) en fonction du step et sauve un PNG.
+    """
+    if not moe_kl_history:
+        print("[INFO] No MoE KL history to plot.")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    steps = [s for (s, v) in moe_kl_history]
+    vals = [v for (s, v) in moe_kl_history]
+
+    plt.figure()
+    plt.plot(steps, vals)
+    plt.xlabel("Global step")
+    plt.ylabel("KL(p || Uniform)")
+    plt.title("MoE load imbalance (KL to uniform)")
+    plt.grid(True)
+
+    out_path = os.path.join(output_dir, "moe_kl_to_uniform.png")
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"[INFO] Saved MoE KL curve to: {out_path}")

@@ -33,6 +33,7 @@ class TrainConfig(ModelConfig):
     lambda_moe: float = 0.005
     grad_log_interval: Optional[int] = 60
     activation_log_interval: Optional[int] = 60
+    moe_kl_log_interval: Optional[int] = 60
 
     seed: int = 70
     use_moe: bool = True

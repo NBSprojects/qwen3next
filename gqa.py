@@ -17,6 +17,8 @@ class GroupRopeAttention(nn.Module):
 
         super().__init__()
 
+        assert hidden_dim % 2 == 0, "RoPE head_dim doit être pair"
+
 
         self.hd = hidden_dim
         self.qk_norm = qk_norm

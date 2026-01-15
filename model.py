@@ -344,6 +344,9 @@ class DecoderOnlyLMDense(nn.Module):
         if tie_embeddings:
             self.lm_head.weight = self.tok_emb.weight
 
+        self.apply(lambda m: _init_weights(m, std=0.02))
+
+
     def forward(self, input_ids, kv_cache=None, use_cache: bool = False):
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)  # on ne passera JAMAIS ici en train

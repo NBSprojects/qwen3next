@@ -49,7 +49,11 @@ class MoE(nn.Module):
         self.min_capacity = 4         # avoid tiny capacities on very small batches
         self.capacity = None          # if set (int): overrides computed capacity
 
-        self.last_tokens_per_expert = None  # [num_exp]
+        self.register_buffer(
+            "last_tokens_per_expert",
+            torch.zeros(num_exp, dtype=torch.float32),
+            persistent=False
+        )
 
     def _compute_capacity(self, N_tokens: int) -> int:
         """
@@ -176,9 +180,9 @@ class MoE(nn.Module):
             effective_counts = torch.zeros(self.num_exp, dtype=torch.float32, device=x.device)
             effective_counts.scatter_add_(0, sorted_exp, keep.to(torch.float32))
             # On mémorise pour que le code de train puisse les lire
-            self.last_tokens_per_expert = effective_counts  # [num_exp]
+            self.last_tokens_per_expert.copy_(effective_counts)
 
-        balancing_loss = torch.sum(p * f)
+        balancing_loss = self.num_exp * torch.sum(p * f)
 
         return moe_output.to(x.dtype), balancing_loss.to(x.dtype)
 
