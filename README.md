@@ -52,7 +52,7 @@ Sorties :
 - figures : avec la config actuelle on obtient un train plutot stable : 
 
 ![Texte alternatif](assets/training_curves.png)
-![Texte alternatif](assets/gradien_norms.png)
+![Texte alternatif](assets/gradient_norms.png)
 ![Texte alternatif](assets/activation_stats.png)
 ![Texte alternatif](assets/moe_kl_to_uniform.png)
 
