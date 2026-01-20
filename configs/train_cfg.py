@@ -14,7 +14,7 @@ class TrainConfig(ModelConfig):
     num_workers: int = 8
 
     # --- Training ---
-    max_steps: int = 2_000
+    max_steps: int = 6_000
     eval_interval: int = 200
     log_interval: int = 20
 
