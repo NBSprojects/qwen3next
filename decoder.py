@@ -12,9 +12,12 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        var = x.pow(2).mean(-1, keepdim=True)
-        x_norm = x * torch.rsqrt(var + self.eps)
-        return self.weight * x_norm
+        dtype = x.dtype
+        x_f = x.float()
+        var = x_f.pow(2).mean(-1, keepdim=True)
+        x_norm = x_f * torch.rsqrt(var + self.eps)
+        return (self.weight.float() * x_norm).to(dtype)
+
 
 class DecoderGQALayer(nn.Module):
     def __init__(self, num_groups, heads_per_group, active_experts, total_experts, emb_dim):
@@ -35,7 +38,7 @@ class DecoderGQALayer(nn.Module):
 
         gqa_hd = emb_dim // (num_groups * heads_per_group)
 
-        self.gqas = nn.ModuleList([GroupRopeAttention(emb_dim, gqa_hd, heads_per_group) for _ in range(num_groups)])
+        self.gqas = nn.ModuleList([GroupRopeAttention(emb_dim, gqa_hd, heads_per_group, qk_norm=True) for _ in range(num_groups)])
         self.moe = MoE(active_experts, total_experts, emb_dim, 4*emb_dim)
 
         self.norm1 = RMSNorm(emb_dim)

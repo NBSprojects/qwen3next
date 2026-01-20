@@ -163,6 +163,13 @@ def main():
     model = model.to(device=device)
     model = model.to(dtype=dtype)
 
+    for layer in model.layers:
+        layer.norm1 = layer.norm1.float()
+        layer.norm2 = layer.norm2.float()
+        layer.moe.gate_layer = layer.moe.gate_layer.float()
+
+    model.norm_out = model.norm_out.float()
+
     # torch.compile après .to(...)
     print("[INFO] Compilation du modèle avec torch.compile...")
     model = torch.compile(model, mode="max-autotune")
