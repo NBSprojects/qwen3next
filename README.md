@@ -76,7 +76,7 @@ Sorties :
 
 Exemple de texte que l'on peut avoir en lançant train avec la config actuelle : 
 
-```bash
+```
 Once upon a time after the storm , the storm accelerated northwestward and continued northeastward . The storm then turned to the southeast on October 21 , then north @-@ northeastward . Early on October 21 , the storm made landfall near Nantucket with winds of 60 mph ( 95 km / h ) . The next day , it degenerated into a remnant low the following day . 
 
  The storm dropped heavy rainfall along its path across the eastern Gulf of Mexico and caused moderate to severe flooding . A storm surge of up to 9 @.@ 6 feet ( 2 @.@ 0 m ) occurred in Sinaloa , which washed a river into the Gulf of Mexico and resulted in widespread power outages . 
