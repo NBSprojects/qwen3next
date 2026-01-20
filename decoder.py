@@ -12,11 +12,10 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        dtype = x.dtype
-        x_f = x.float()
-        var = x_f.pow(2).mean(-1, keepdim=True)
-        x_norm = x_f * torch.rsqrt(var + self.eps)
-        return (self.weight.float() * x_norm).to(dtype)
+        # mean en fp32, mais sans caster tout x en fp32
+        var = (x * x).mean(dim=-1, keepdim=True, dtype=torch.float32)  # accumulation fp32
+        inv_rms = torch.rsqrt(var + self.eps).to(dtype=x.dtype)        # bf16
+        return self.weight.to(dtype=x.dtype) * (x * inv_rms)
 
 
 class DecoderGQALayer(nn.Module):

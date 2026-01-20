@@ -49,9 +49,12 @@ python train.py
 
 Sorties :
 - logs dans le terminal
-- figures dans :
-  - `analytics/training_curves.png`
-  - `analytics/gradient_norms.png`
+- figures : avec la config actuelle on obtient un train plutot stable : 
+
+![Texte alternatif](assets/training_curves.png)
+![Texte alternatif](assets/gradien_norms.png)
+![Texte alternatif](assets/activation_stats.png)
+![Texte alternatif](assets/moe_kl_to_uniform.png)
 
 ---
 
@@ -71,5 +74,17 @@ Sorties :
 
 ---
 
+Exemple de texte que l'on peut avoir en lançant train avec la config actuelle : 
 
+```bash
+Once upon a time after the storm , the storm accelerated northwestward and continued northeastward . The storm then turned to the southeast on October 21 , then north @-@ northeastward . Early on October 21 , the storm made landfall near Nantucket with winds of 60 mph ( 95 km / h ) . The next day , it degenerated into a remnant low the following day . 
 
+ The storm dropped heavy rainfall along its path across the eastern Gulf of Mexico and caused moderate to severe flooding . A storm surge of up to 9 @.@ 6 feet ( 2 @.@ 0 m ) occurred in Sinaloa , which washed a river into the Gulf of Mexico and resulted in widespread power outages . 
+
+ = = Meteorological history = = 
+
+ A tropical disturbance was observed at 1500 UTC on November 8 , south of the Azores . Initially , the system was named <unk> on November 7 , but the JMA designated the system as Tropical Depression Six on November 8 while the system was still offshore . Shortly thereafter , the depression began developing a broad low pressure system while crossing southeastern Africa . On November 10 , the depression strengthened into Tropical Storm Eloise early the next day . 
+
+ On December 11 , a trough , formed in the Caribbean Sea about 270 mi ( 849
+
+```

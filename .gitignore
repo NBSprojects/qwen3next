@@ -1,5 +1,5 @@
 __pycache__/
 *.ckpt
 *.txt
-*.png
+analytics/
 old_analytics/

@@ -78,12 +78,16 @@ class MoE(nn.Module):
         N = bs * seq_len
         NK = N * self.k
 
-        # --- Router ---
-        logits = self.gate_layer(x)                 # [bs, seq_len, num_exp]
-        probs = F.softmax(logits, dim=-1, dtype=torch.float32)
+        # --- Router (dtype-safe, memory-friendly) ---
+        w = self.gate_layer.weight  # peut être fp32 si tu as appliqué le changement 7
 
-        # probs_lbl for balancing loss (detached input)
-        probs_lbl = F.softmax(self.gate_layer(x.detach()), dim=-1, dtype=torch.float32)
+        w_for_mm = w.to(dtype=x.dtype) if w.dtype != x.dtype else w
+
+        logits = F.linear(x, w_for_mm)  # logits en bf16
+        probs  = F.softmax(logits.float(), dim=-1)  # softmax en fp32 (stable)
+
+        logits_lbl = F.linear(x.detach(), w_for_mm)
+        probs_lbl  = F.softmax(logits_lbl.float(), dim=-1)
 
         topk_vals, topk_inds = torch.topk(probs, self.k, dim=-1)  # [bs, seq_len, k]
         cl_values = topk_vals / (topk_vals.sum(dim=-1, keepdim=True) + 1e-9)  # [bs, seq_len, k]
@@ -152,9 +156,10 @@ class MoE(nn.Module):
         buf_out_full[:-1].copy_(buf_out_flat)
 
         # --- Gather back, apply weights (mask overflow by zeroing weights) ---
-        w_masked = sorted_w * keep.to(sorted_w.dtype)   # [N*k]
-        out_sorted = buf_out_full.index_select(0, slot) # [N*k, in_d]
-        out_sorted = out_sorted * w_masked.unsqueeze(1) # [N*k, in_d]
+        w_masked = (sorted_w * keep.to(sorted_w.dtype)).to(buf_out_full.dtype)  # -> bf16
+        out_sorted = buf_out_full.index_select(0, slot)                         # bf16
+        out_sorted = out_sorted * w_masked.unsqueeze(1)                         # reste bf16
+
 
         # --- Unsort to original dispatch order ---
         out_dispatch = out_sorted.new_empty((NK, in_d))
