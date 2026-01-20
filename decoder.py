@@ -26,6 +26,8 @@ class DecoderGQALayer(nn.Module):
         on veut que hidden_dim des gqa vérifie : hd * G * H = emb_dim
         '''
 
+        self.resid_scale = 1.0
+
         self.num_groups = num_groups
 
         assert emb_dim % num_groups == 0
@@ -71,7 +73,7 @@ class DecoderGQALayer(nn.Module):
 
         # x : [bs, seq_len, emb_dim]
 
-        x = x_init + x
+        x = x_init + self.resid_scale * x
 
         x_mid = x
 
@@ -79,7 +81,7 @@ class DecoderGQALayer(nn.Module):
 
         x, load_balancing_loss = self.moe(x)
 
-        x_final = x_mid + x
+        x_final = x_mid + self.resid_scale * x
 
         if use_cache:
             return x_final, load_balancing_loss, new_kv_cache

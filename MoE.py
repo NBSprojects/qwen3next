@@ -184,5 +184,5 @@ class MoE(nn.Module):
 
         balancing_loss = self.num_exp * torch.sum(p * f)
 
-        return moe_output.to(x.dtype), balancing_loss.to(x.dtype)
+        return moe_output.to(x.dtype), balancing_loss
 

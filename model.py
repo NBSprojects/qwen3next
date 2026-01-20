@@ -72,6 +72,10 @@ class DecoderOnlyLM(nn.Module):
             ]
         )
 
+        scale = 1.0 / math.sqrt(2.0 * n_layers)  # GPT-2 style, très stable
+        for layer in self.layers:
+            layer.resid_scale = scale
+
         # Norm finale de la sortie
         self.norm_out = RMSNorm(emb_dim)
 
